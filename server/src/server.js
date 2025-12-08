@@ -120,6 +120,186 @@ const checkContentPermission = (requiredRole = 'editor') => {
   };
 };
 
+// User Management Routes
+// Get all users (admin only)
+app.get('/api/users', authenticateToken, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
+    }
+
+    // Get users with the correct field names
+    const [users] = await pool.query(`
+      SELECT 
+        id, 
+        name,
+        email, 
+        role, 
+        is_active as status, 
+        created_at, 
+        updated_at 
+      FROM users`
+    );
+    
+    if (!users || !Array.isArray(users)) {
+      throw new Error('Invalid response from database');
+    }
+    
+    res.json(users);
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    
+    let statusCode = 500;
+    let message = 'Error fetching users';
+    
+    if (error.code === 'ER_NO_SUCH_TABLE') {
+      statusCode = 500;
+      message = 'Database table does not exist. Please run database migrations.';
+    } else if (error.code === 'ER_ACCESS_DENIED_ERROR') {
+      statusCode = 500;
+      message = 'Database access denied. Please check database credentials.';
+    } else if (error.message.includes('ECONNREFUSED')) {
+      statusCode = 503;
+      message = 'Unable to connect to the database. Please try again later.';
+    }
+    
+    res.status(statusCode).json({ 
+      message,
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Create new user (admin only)
+app.post('/api/users', authenticateToken, async (req, res) => {
+  try {
+    const { name, email, password, role } = req.body;
+    
+    // Validate input
+    if (!name || !email || !password || !role) {
+      return res.status(400).json({ message: 'All fields are required' });
+    }
+
+    // Check if user already exists
+    const [existingUser] = await pool.query('SELECT id FROM users WHERE email = ?', [email]);
+    if (existingUser.length > 0) {
+      return res.status(400).json({ message: 'User with this email already exists' });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    // Create user
+    const [result] = await pool.query(
+      'INSERT INTO users (name, email, password, role, is_active) VALUES (?, ?, ?, ?, 1)',
+      [name, email, hashedPassword, role]
+    );
+
+    // Get the created user (excluding password)
+    const [newUser] = await pool.query(
+      'SELECT id, name, email, role, is_active as status, created_at, updated_at FROM users WHERE id = ?',
+      [result.insertId]
+    );
+
+    res.status(201).json(newUser[0]);
+  } catch (error) {
+    console.error('Error creating user:', error);
+    res.status(500).json({ 
+      message: 'Error creating user',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Update user (admin only)
+app.put('/api/users/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, email, role, password } = req.body;
+
+    // Check if user exists
+    const [users] = await pool.query('SELECT * FROM users WHERE id = ?', [id]);
+    if (users.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const updateFields = [];
+    const updateValues = [];
+
+    if (name !== undefined) {
+      updateFields.push('name = ?');
+      updateValues.push(name);
+    }
+    if (email) {
+      updateFields.push('email = ?');
+      updateValues.push(email);
+    }
+    if (role) {
+      updateFields.push('role = ?');
+      updateValues.push(role);
+    }
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      updateFields.push('password = ?');
+      updateValues.push(hashedPassword);
+    }
+
+    if (updateFields.length === 0) {
+      return res.status(400).json({ message: 'No fields to update' });
+    }
+
+    // Add updated_at timestamp
+    updateFields.push('updated_at = CURRENT_TIMESTAMP');
+
+    const query = `UPDATE users SET ${updateFields.join(', ')} WHERE id = ?`;
+    updateValues.push(id);
+
+    await pool.query(query, updateValues);
+
+    // Get the updated user (excluding password)
+    const [updatedUser] = await pool.query(
+      'SELECT id, name, email, role, is_active as status, created_at, updated_at FROM users WHERE id = ?',
+      [id]
+    );
+
+    if (updatedUser.length === 0) {
+      return res.status(404).json({ message: 'User not found after update' });
+    }
+
+    res.json(updatedUser[0]);
+  } catch (error) {
+    console.error('Error updating user:', error);
+    res.status(500).json({ 
+      message: 'Error updating user',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Delete user (admin only)
+app.delete('/api/users/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Prevent deleting self
+    if (req.user.id === parseInt(id)) {
+      return res.status(400).json({ message: 'Cannot delete your own account' });
+    }
+
+    const [result] = await pool.query('DELETE FROM users WHERE id = ?', [id]);
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.status(204).send();
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).json({ message: 'Error deleting user' });
+  }
+});
+
 // Content Type Routes
 app.get('/api/content/types', authenticateToken, async (req, res) => {
   try {
